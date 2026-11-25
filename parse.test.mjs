@@ -150,3 +150,25 @@ test('fields the automation adds are kept', () => {
 test('missing time is stamped with local offset', () => {
   assert.match(parse({ ...kaspi, time: undefined }).time, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d$/)
 })
+
+test('a manual entry keeps the category picked for it', () => {
+  const n = { time, app: 'Manual', title: 'Coffee with Alex', subtitle: 'food', body: '1 500,5' }
+  assert.deepEqual(parse(n), { ...n, amount: 1500.5, currency: '₸', merchant: 'Coffee with Alex', kzt: 1500.5, category: 'food' })
+  // a reparse sees its own output again: the pick survives
+  assert.equal(parse(parse(n)).category, 'food')
+})
+
+test('a manual entry without a category falls back to the merchant table', () => {
+  const r = parse({ time, app: 'Manual', title: 'YANDEX.GO', subtitle: 'other', body: '2480' })
+  assert.equal(r.category, 'transport')
+  assert.equal(parse({ time, app: 'Manual', title: 'cash', subtitle: 'other', body: '900' }).category, '')
+})
+
+test('a manual correction is a negative amount', () => {
+  assert.equal(parse({ time, app: 'Manual', title: 'oops', subtitle: 'food', body: '−1500' }).amount, -1500)
+})
+
+test('a manual entry with no number is kept raw', () => {
+  const n = { time, app: 'Manual', title: 'x', subtitle: 'food', body: '' }
+  assert.deepEqual(parse(n), n)
+})

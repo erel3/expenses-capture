@@ -76,6 +76,19 @@ const PARSERS = [
       return { amount: (refund ? -1 : 1) * number(m[2]), currency: m[3], merchant }
     },
   },
+  {
+    // A payment typed in by hand with the "Log Expense" shortcut (cash, transfers, anything that
+    // sends no push): title = what it was, subtitle = the category picked, body = the amount in
+    // tenge as Shortcuts wrote the number ("1500", "1 500,5", "-1500" for a correction). The
+    // picked category wins over the merchant table; "other" means none.
+    match: (n) => n.app === 'Manual',
+    parse(n) {
+      const amount = number(n.body.replace(/[−–]/g, '-'))
+      if (!n.body.trim() || !Number.isFinite(amount)) return null
+      const picked = n.subtitle && n.subtitle !== 'other' ? String(n.subtitle) : ''
+      return { amount, currency: '₸', merchant: n.title.trim(), ...(picked ? { category: picked } : {}) }
+    },
+  },
 ]
 
 // Local time with its offset, e.g. 2026-11-19T19:23:05+05:00
@@ -116,7 +129,8 @@ function parse(n, now = new Date()) {
       ...note,
       ...hit,
       ...(kzt === undefined ? {} : { kzt }),
-      category: category(hit.merchant),
+      // A parser's own category (a manual entry's pick) wins over the merchant table.
+      category: hit.category || category(hit.merchant),
     }
   } catch (e) {
     return { ...note, error: String(e) }
@@ -159,4 +173,4 @@ function reparseLines(text) {
   return out
 }
 
-if (typeof module !== 'undefined') module.exports = { parse, reparseLines, PARSERS }
+if (typeof module !== 'undefined') module.exports = { parse, reparseLines, PARSERS, CATEGORIES }

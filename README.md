@@ -6,11 +6,17 @@ The phone runs the shortcut "Log Payment" on every payment push. It appends one 
 `parse.js` recognises a purchase or a refund, `amount` (negative for a refund), `currency`,
 `kzt` (the amount in tenge, when known), `merchant`, `category`.
 
+Payments that send no push (cash, a transfer to a person) are typed in with the shortcut
+**"Log Expense"** (iPhone or Mac: amount, what it was, a category). It appends the same kind of
+line to `manual-<device model>.json` beside `payments.json` (`manual-iPhone.json`,
+`manual-Mac.json`): one file per device, so every file has one writer. A mistake is corrected by
+logging the negative amount. `just install-expense` adds it once (it then syncs to the phone).
+
 Two copies, one writer each:
 - **iCloud `payments.json`** — the phone's. Only the shortcut writes it, and only by appending.
   Nothing on the Mac rewrites it: a rewrite could drop a line the phone appended meanwhile.
 - **`~/.local/share/expenses/payments.json`** — the Mac's. `just reparse` rebuilds it from the
-  iCloud file with the current `parse.js`, so a new parser or category also covers old pushes.
+  iCloud files (`payments.json` and every `manual-*.json`) with the current `parse.js`, so a new parser or category also covers old pushes.
   A push repeated within a minute (every field but `time` the same) counts once: the automation
   sometimes runs twice for one push.
 

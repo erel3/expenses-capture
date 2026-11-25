@@ -9,8 +9,13 @@ build: test
 install: build
   open "build/Log Payment.shortcut"
 
-# Every later change: rewrites the installed shortcut's actions in Shortcuts' database, keeping
-# its identifier (the automation stays bound), and waits for the iCloud upload.
+# First install only of "Log Expense" (hand-typed payments; no automation points at it).
+install-expense: build
+  open "build/Log Expense.shortcut"
+
+# Every later change: rewrites both installed shortcuts' actions in Shortcuts' database, keeping
+# their identifiers (the automation stays bound), and waits for the iCloud uploads. One not
+# installed yet is skipped.
 update: test
   python3 build.py update
 
