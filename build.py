@@ -227,7 +227,9 @@ def expense_actions(script: str, categories: list[str]):
            CustomOutputName="What", UUID=what),
     action("list", WFItems=[{"WFItemType": 0, "WFValue": tokens([c])} for c in categories],
            UUID=items),
-    action("choosefromlist", WFInput={"Type": "Variable", "Variable": attachment(output(items, "List"))},
+    # The list as a plain attachment, as Shortcuts stores it itself: wrapped as {"Type": "Variable"}
+    # (the If action's form) it read as empty, the question was skipped and the category came out "".
+    action("choosefromlist", WFInput=attachment(output(items, "List")),
            WFChooseFromListActionPrompt="Category", CustomOutputName="Category", UUID=picked),
     action("getdevicedetails", WFDeviceDetail="Device Model", CustomOutputName="Device", UUID=device),
     # The same shape the phone automation sends, so parse.js's Manual parser reads it; the amount
