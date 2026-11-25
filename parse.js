@@ -223,6 +223,9 @@ function categories(editsText) {
 function reparseLines(text, editsText) {
   const edits = readEdits(editsText)
   const seen = new Map() // push without time -> when it was last seen, in ms
+  // The same line twice (time included) is one push, wherever it sits: a file and its archive
+  // copy, read side by side while the old layout is being moved.
+  const ids = new Set()
   const out = []
   for (const line of String(text).split('\n')) {
     if (!line.trim()) continue
@@ -236,13 +239,16 @@ function reparseLines(text, editsText) {
     // A hand run of the shortcut on the phone appends one probe line (it asks the write
     // permission once); it is no payment.
     if (!n || typeof n !== 'object' || n.probe) continue
+    const id = pushId(n)
+    if (ids.has(id)) continue
+    ids.add(id)
     const key = JSON.stringify([n.app, n.title, n.subtitle, n.body])
     const at = Date.parse(n.time)
     const before = seen.get(key)
     seen.set(key, at)
     if (before !== undefined && at - before < SAME_PUSH_MS) continue
     const p = parse(n)
-    p.id = pushId(p)
+    p.id = id
     out.push(applyEdits(p, edits))
   }
   // Files are read one after another; the list is in time order whatever the file order, lines

@@ -100,3 +100,10 @@ test('lines from several files come out in time order', () => {
   const out = reparse([wolt('2026-11-21T10:00:00+05:00', 2000), wolt('2026-11-20T10:00:00+05:00', 1000)])
   assert.deepEqual(out.map((p) => p.amount), [1000, 2000])
 })
+
+test('the same line read from two files counts once', () => {
+  const limit = (time) => JSON.stringify({ time, app: 'Kaspi.kz', title: 'Kaspi Gold', subtitle: '', body: 'Превышен лимит' })
+  const file = [limit('2026-11-25T08:52:00+05:00'), limit('2026-11-25T10:07:00+05:00')]
+  // a real repeat an hour later stays two; the archive copy of both adds nothing
+  assert.equal(reparse([...file, ...file]).length, 2)
+})
