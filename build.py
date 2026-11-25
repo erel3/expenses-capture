@@ -183,16 +183,20 @@ def payment_actions(script: str):
 
 def expense_actions(script: str, categories: list[str]):
   name = EXPENSE
-  amount, what, items, picked, device, fields, given = (
-    stable(name, r) for r in ("amount", "what", "categories", "picked", "device", "fields", "given"))
+  amount, what, items, picked, device, fields, given, received = (
+    stable(name, r) for r in ("amount", "what", "categories", "picked", "device", "fields", "given", "received"))
   shortcut_input = {"Type": "ExtensionInput"}
-  upload, upload_end = upload_branch(name, shortcut_input)
+  # "Contains" on the raw input file never matched the marker, so `update`'s run fell through to
+  # the questions and failed ("Please choose a value for each parameter"): compare its text.
+  received_var = output(received, "Received")
+  upload, upload_end = upload_branch(name, received_var)
   amount_var, what_var = output(amount, "Amount"), output(what, "What")
   picked_var, device_var = output(picked, "Category"), output(device, "Device")
   parse_block, line = run_parse(name, script, output(given, "Expense"), "Expense line")
   # One file per device: payments.json is the phone automation's, manual-Mac.json the Mac's own.
   append, append_end = append_if_parsed(name, line, ["manual-", device_var, ".json"])
   return [
+    action("gettext", WFTextActionText=tokens([shortcut_input]), CustomOutputName="Received", UUID=received),
     *upload,
     action("ask", WFInputType="Number", WFAskActionPrompt="Amount, ₸",
            WFAskActionAllowsDecimalNumbers=True, WFAskActionAllowsNegativeNumbers=True,
@@ -280,7 +284,8 @@ def update(name, new_actions):
   new script). The whole database is backed up first; restore = quit Shortcuts, copy it back.
   """
   BACKUPS.mkdir(parents=True, exist_ok=True)
-  backup = BACKUPS / f"shortcuts-backup-{time.strftime('%Y%m%d-%H%M%S')}.sqlite"
+  # The name too: both shortcuts are updated within the same second, and one backup overwrote the other.
+  backup = BACKUPS / f"shortcuts-backup-{time.strftime('%Y%m%d-%H%M%S')}-{name.replace(' ', '-')}.sqlite"
   with sqlite3.connect(DB, timeout=10) as db:
     rows = db.execute("select Z_PK from ZSHORTCUT where ZNAME = ? and ZTOMBSTONED = 0",
                       (name,)).fetchall()
