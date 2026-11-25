@@ -342,7 +342,8 @@ def update(name, new_actions):
     subprocess.run(["shortcuts", "run", name, "--input-path", str(mark)], check=True, timeout=60)
   except subprocess.TimeoutExpired:
     print("the empty run timed out; checking the upload anyway")
-  for _ in range(30):
+  # iCloud took ~40 s for Log Expense once (2026-11-25), so 30 s reported a false failure.
+  for _ in range(90):
     with sqlite3.connect(f"file:{DB}?mode=ro", uri=True) as db:
       synced, last = db.execute("select ZSYNCHASH, ZLASTSYNCEDHASH from ZSHORTCUT where Z_PK = ?",
                                 (pk,)).fetchone()
@@ -350,7 +351,7 @@ def update(name, new_actions):
       print(f'"{name}" uploaded to iCloud')
       return
     time.sleep(1)
-  sys.exit(f'"{name}" not uploaded to iCloud within 30 s: check the phone before relying on it')
+  sys.exit(f'"{name}" not uploaded to iCloud within 90 s: check the phone before relying on it')
 
 
 if __name__ == "__main__":
