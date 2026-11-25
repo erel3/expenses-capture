@@ -5,6 +5,9 @@
 // an HTML page that WebKit renders (so: plain browser JS, no imports, never the text of a
 // closing script tag), and in node for the tests and reparse.mjs.
 
+// The operations a Kaspi Gold statement lists, longest first (one is a prefix of another).
+const STATEMENT_OPS = ['Поступление со своего счета', 'Перевод на свой счет', 'Пополнение', 'Покупка', 'Перевод', 'Разное', 'Снятие']
+
 // Merchant (as the bank prints it, upper case) -> category. A key matches the merchant itself or
 // its start, so 'YANDEX' would also catch 'YANDEX.GO'. Unknown merchants get an empty category.
 const CATEGORIES = {
@@ -47,7 +50,8 @@ const PARSERS = [
     // Kaspi Gold: "Покупка: 3 080 ₸\nYANDEX.GO\nДоступно: 100 000,00 ₸", a refund
     // "Отмена покупки: 204,50 ₸\nWOLT.COM\nДоступно: …", a foreign one
     // "Покупка: 95,88 $ (43 674,30 ₸)\nFACEIT\nДоступно: …" (tenge in brackets).
-    match: (n) => /kaspi/i.test(n.app) || /kaspi/i.test(n.title),
+    // Not a statement row: those have their own parser below ("Kaspi statement" matched here once).
+    match: (n) => n.app !== 'Kaspi statement' && (/kaspi/i.test(n.app) || /kaspi/i.test(n.title)),
     parse(n) {
       const m = n.body.match(
         /(Покупка|Отмена покупки):\s*([\d\s]+(?:,\d+)?)\s*(\S+)(?:\s*\(([\d\s]+(?:,\d+)?)\s*₸\))?/,
@@ -89,6 +93,39 @@ const PARSERS = [
       return { amount, currency: '₸', merchant: n.title.trim(), ...(picked ? { category: picked } : {}) }
     },
   },
+  {
+    // A row of a Kaspi Gold statement (PDF, imported by the apps; parseStatement below), its text
+    // as PDFKit gives it: "23.11.26 - 14 607,97 ₸ (- 28,74 EUR)\nПокупка LinkedIn P0000000000", or
+    // "22.11.26 - 581,03 ₸ Покупка FACEIT\nКурсовая разница" (a foreign payment's final settlement).
+    // Purchases, transfers, fees and cash are spending; money in and moves between own accounts are
+    // not (kind "income" / "own": no amount, out of every total and list).
+    match: (n) => n.app === 'Kaspi statement',
+    parse(n) {
+      const lines = n.body.split('\n')
+      const m = lines[0].match(/^\d\d\.\d\d\.\d\d ([-+]) ([\d\s]+,\d\d) ₸ ?(.*)$/)
+      if (!m) return null
+      const parts = [m[3], ...lines.slice(1)].map((l) => l.trim()).filter(Boolean)
+      const fx = (parts[0] || '').match(/^\(([-+]) ([\d\s]+,\d\d) ([A-Z]{3})\)$/)
+      if (fx) parts.shift()
+      const rest = parts.join('\n')
+      const op = STATEMENT_OPS.find((o) => rest.startsWith(o))
+      if (!op) return null
+      let details = rest.slice(op.length).replace(/\s+/g, ' ').trim()
+      const settlement = /Курсовая разница$/.test(details)
+      if (settlement) details = details.replace(/\s*Курсовая разница$/, '')
+      const spent = (m[1] === '-' ? 1 : -1) * number(m[2])
+      const common = { dateOnly: true, operation: op, merchant: details }
+      if (op === 'Пополнение' || op === 'Поступление со своего счета') return { ...common, kind: 'income' }
+      if (op === 'Перевод на свой счет') return { ...common, kind: 'own' }
+      const money = fx
+        ? { amount: (fx[1] === '-' ? 1 : -1) * number(fx[2]), currency: fx[3], kzt: spent }
+        : { amount: spent, currency: '₸', kzt: spent }
+      if (op === 'Перевод') return { ...common, ...money, category: 'transfers', transfer: true }
+      if (op === 'Разное') return { ...common, ...money, category: 'fees' }
+      if (op === 'Снятие') return { ...common, ...money, category: 'cash' }
+      return { ...common, ...money, ...(settlement ? { settlement: true } : {}) }
+    },
+  },
 ]
 
 // Local time with its offset, e.g. 2026-11-19T19:23:05+05:00
@@ -108,7 +145,8 @@ function localIso(d) {
 // parsed fields are dropped and computed again.
 function parse(n, now = new Date()) {
   const received = { ...n }
-  for (const k of ['time', 'amount', 'kzt', 'currency', 'merchant', 'category', 'error', 'id', 'hidden', 'edited']) {
+  for (const k of ['time', 'amount', 'kzt', 'currency', 'merchant', 'category', 'error', 'id', 'hidden', 'edited',
+    'kind', 'dateOnly', 'operation', 'transfer', 'settlement', 'aliases', 'merged']) {
     delete received[k]
   }
   const note = {
@@ -124,6 +162,8 @@ function parse(n, now = new Date()) {
     const parser = PARSERS.find((p) => p.match(note))
     const hit = parser ? parser.parse(note) : null
     if (!hit) return note
+    // Money in, a move between own accounts: understood, but no payment.
+    if (hit.amount === undefined) return { ...note, ...hit }
     const kzt = hit.kzt ?? (hit.currency === '₸' ? hit.amount : undefined)
     return {
       ...note,
@@ -147,7 +187,9 @@ const SAME_PUSH_MS = 60000
 // A push's id: a hash of what was received, so it never changes and corrections can point at it.
 // FNV-1a, twice with different seeds, 16 hex digits.
 function pushId(n) {
-  const text = [n.time, n.app, n.title, n.body].map((v) => String(v ?? '')).join('|')
+  // `seq` (a statement row's place in its day) only when present: older ids stay what they were.
+  const fields = [n.time, n.app, n.title, n.body, ...(n.seq === undefined ? [] : [n.seq])]
+  const text = fields.map((v) => String(v ?? '')).join('|')
   const fnv = (seed) => {
     let h = seed >>> 0
     for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619) >>> 0
@@ -162,7 +204,7 @@ function pushId(n) {
 //   {"time", "edit": "hide" | "unhide", "id"}
 // A payment's own category beats its merchant's, which beats the CATEGORIES table.
 function readEdits(text) {
-  const edits = { category: new Map(), merchant: new Map(), amount: new Map(), hidden: new Map() }
+  const edits = { category: new Map(), merchant: new Map(), amount: new Map(), hidden: new Map(), own: new Set() }
   const lines = []
   for (const line of String(text || '').split('\n')) {
     if (!line.trim()) continue
@@ -180,26 +222,39 @@ function readEdits(text) {
     else if (e.edit === 'category' && e.merchant) edits.merchant.set(String(e.merchant).toUpperCase(), String(e.value ?? ''))
     else if (e.edit === 'amount' && e.id && Number.isFinite(Number(e.value))) edits.amount.set(e.id, Number(e.value))
     else if ((e.edit === 'hide' || e.edit === 'unhide') && e.id) edits.hidden.set(e.id, e.edit === 'hide')
+    // {"edit": "own", "value": "*1858"}: a transfer whose details hold this is to the owner's own
+    // card or account, so no spending ("not-own" takes it back).
+    else if (e.edit === 'own' && e.value) edits.own.add(String(e.value))
+    else if (e.edit === 'not-own' && e.value) edits.own.delete(String(e.value))
   }
   return edits
 }
 
 function applyEdits(p, edits) {
+  // A row merged from a push or a manual entry answers to their ids too: a correction made on the
+  // push before the statement came keeps working.
+  const ids = [p.id, ...(p.aliases || [])]
+  const latest = (map) => ids.map((id) => map.get(id)).find((v) => v !== undefined)
+  if (p.transfer && [...edits.own].some((own) => String(p.merchant || '').includes(own))) {
+    for (const k of ['amount', 'kzt', 'currency', 'category', 'transfer']) delete p[k]
+    p.kind = 'own'
+  }
   const changed = []
   if (p.amount !== undefined) {
-    const own = edits.category.get(p.id)
+    const own = latest(edits.category)
     const merchant = edits.merchant.get(String(p.merchant || '').toUpperCase())
     const picked = own ?? merchant
     if (picked !== undefined && picked !== p.category) {
       p.category = picked === 'other' ? '' : picked
       changed.push('category')
     }
-    if (edits.amount.has(p.id)) {
-      p.kzt = edits.amount.get(p.id)
+    const amount = latest(edits.amount)
+    if (amount !== undefined) {
+      p.kzt = amount
       changed.push('amount')
     }
   }
-  if (edits.hidden.get(p.id)) p.hidden = true
+  if (latest(edits.hidden)) p.hidden = true
   if (changed.length) p.edited = changed
   return p
 }
@@ -228,6 +283,7 @@ function reparseLines(text, editsText) {
   // 2026-11-25: a manual "Testing 200" from 15:25 vanished behind the same entry from 16:05).
   const lines = []
   const unreadable = []
+  const statements = []
   for (const line of String(text).split('\n')) {
     if (!line.trim()) continue
     let n
@@ -240,6 +296,11 @@ function reparseLines(text, editsText) {
     // A hand run of a shortcut appends one probe line (it asks the write permission once); it is
     // no payment.
     if (!n || typeof n !== 'object' || n.probe) continue
+    // A statement file's first line: the days it covers, not a push.
+    if (n.statement && !n.app) {
+      statements.push(n)
+      continue
+    }
     lines.push(n)
   }
   const at = (n) => Date.parse(n.time) || 0
@@ -256,7 +317,9 @@ function reparseLines(text, editsText) {
     // Only a bank push can arrive twice (the automation ran twice for one notification). A manual
     // entry is typed on purpose: two identical ones a minute apart are two payments (owner,
     // 2026-11-25: skip only the notification's real duplicate).
-    if (n.app !== 'Manual') {
+    // Not statement rows either: the bank's own list, every row a payment (two identical coffees on
+    // one day carry the same noon time); overlapping statements meet through the ids instead.
+    if (n.app !== 'Manual' && n.app !== 'Kaspi statement') {
       const key = JSON.stringify([n.app, n.title, n.subtitle, n.body])
       const before = seen.get(key)
       seen.set(key, at(n))
@@ -264,10 +327,123 @@ function reparseLines(text, editsText) {
     }
     const p = parse(n)
     p.id = id
-    out.push(applyEdits(p, edits))
+    out.push(p)
   }
-  // Lines with no time (unreadable) last, in the order met.
-  return [...out, ...unreadable]
+  return [...mergeStatements(out, statements).map((p) => applyEdits(p, edits)), ...unreadable]
 }
 
-if (typeof module !== 'undefined') module.exports = { parse, reparseLines, categories, pushId, PARSERS, CATEGORIES }
+// The local day of a line ("2026-11-23"): what statements and pushes are matched by.
+function dayOf(p) {
+  return String(p.time || '').slice(0, 10)
+}
+
+const sameMerchant = (a, b) => {
+  const x = String(a || '').toUpperCase().trim()
+  const y = String(b || '').toUpperCase().trim()
+  return Boolean(x && y) && (x.startsWith(y) || y.startsWith(x))
+}
+
+// Statements win (owner, 2026-11-25) for every day one covers (from <= day < to; `to` itself only
+// when the statement was issued later, i.e. the day is whole): the bank's list is complete there.
+// A Kaspi Gold push of such a day is folded into its statement row (same tenge, the same or a cut
+// merchant first): the row takes the push's exact time and keeps its id as an alias, so
+// corrections made on the push still apply; a push with no row is dropped. A manual entry with
+// the same tenge on that day is folded the same way (transfers first: what is typed by hand is
+// mostly that), its category kept when the row has none; an unmatched manual entry stays (cash,
+// another bank). Days no statement covers are left as they are.
+function mergeStatements(list, statements) {
+  if (!statements.length) return list
+  const covered = (day) => statements.some((s) => s.from <= day && (day < s.to || (s.issued && day === s.to && s.issued > s.to)))
+  const rows = new Map() // day -> statement payment rows
+  for (const p of list) {
+    if (p.app === 'Kaspi statement' && p.amount !== undefined) {
+      const day = dayOf(p)
+      if (!rows.has(day)) rows.set(day, [])
+      rows.get(day).push(p)
+    }
+  }
+  const used = new Set()
+  const fold = (row, other, { time }) => {
+    used.add(row)
+    row.aliases = [...(row.aliases || []), other.id]
+    row.merged = [...(row.merged || []), other.app]
+    if (time) {
+      row.time = other.time
+      row.dateOnly = false
+    }
+  }
+  const out = []
+  for (const p of list) {
+    const day = dayOf(p)
+    const kaspiPush = p.app !== 'Kaspi statement' && /kaspi/i.test(p.app) && p.title === 'Kaspi Gold' && p.amount !== undefined
+    const manual = p.app === 'Manual' && p.amount !== undefined
+    if (!(kaspiPush || manual) || !covered(day)) {
+      out.push(p)
+      continue
+    }
+    const free = (rows.get(day) || []).filter((r) => !used.has(r) && r.kzt === p.kzt)
+    if (kaspiPush) {
+      const row = free.find((r) => sameMerchant(r.merchant, p.merchant)) || free[0]
+      if (row) fold(row, p, { time: true })
+      continue // statement wins: a push the bank did not list is no payment of that card
+    }
+    const row = free.find((r) => r.transfer) || free[0]
+    if (!row) {
+      out.push(p)
+      continue
+    }
+    fold(row, p, { time: false })
+    if (p.category && (!row.category || row.category === 'transfers')) row.category = p.category
+  }
+  return out
+}
+
+// Kaspi Gold statement text (PDFKit, every page joined) -> the lines its file holds: a header
+// {"statement": "kaspi-gold", "from", "to", "issued"} and one line per row {"app": "Kaspi
+// statement", "time" (the day, noon), "date", "seq", "body", "statement"}. `seq` is the row's place
+// in its day counted from the day's oldest, so the same day read from two overlapping statements
+// gets the same ids and two identical coffees stay two. The day the statement was issued on is
+// partial: its rows are left out (the next statement brings it whole). Throws on anything else.
+function parseStatement(text) {
+  const all = String(text).split('\n').map((l) => l.trim())
+  const full = all.join('\n')
+  if (!/Kaspi Gold/.test(full)) throw new Error('not a Kaspi Gold statement')
+  const period = full.match(/за период с (\d\d)\.(\d\d)\.(\d\d) по (\d\d)\.(\d\d)\.(\d\d)/)
+  if (!period) throw new Error('no statement period found')
+  const iso = (d, m, y) => `20${y}-${m}-${d}`
+  const from = iso(period[1], period[2], period[3])
+  const to = iso(period[4], period[5], period[6])
+  const months = { января: '01', февраля: '02', марта: '03', апреля: '04', мая: '05', июня: '06', июля: '07',
+    августа: '08', сентября: '09', октября: '10', ноября: '11', декабря: '12' }
+  const issuedMatch = full.match(/от (\d{1,2}) ([а-я]+) (\d{4})/)
+  const issued = issuedMatch && months[issuedMatch[2]]
+    ? `${issuedMatch[3]}-${months[issuedMatch[2]]}-${issuedMatch[1].padStart(2, '0')}` : to
+  const start = all.findIndex((l) => l.startsWith('Дата Сумма Операция'))
+  if (start < 0) throw new Error('no operations table found')
+  const rows = []
+  for (const line of all.slice(start + 1)) {
+    if (line.startsWith('- Сумма заблокирована') || line.startsWith('Раздел «')) break
+    if (!line || line.startsWith('Приложение к Справке') || line.includes('АО «Kaspi Bank»') || line.startsWith('Дата Сумма')) continue
+    if (/^\d\d\.\d\d\.\d\d [-+] /.test(line)) rows.push([line])
+    else if (rows.length) rows[rows.length - 1].push(line)
+  }
+  const name = `${from}_${to}`
+  const byDay = new Map()
+  for (const r of rows) {
+    const [d, m, y] = r[0].slice(0, 8).split('.')
+    const date = iso(d, m, y)
+    if (!byDay.has(date)) byDay.set(date, [])
+    byDay.get(date).push(r.join('\n'))
+  }
+  const out = [{ statement: 'kaspi-gold', from, to, issued }]
+  for (const [date, bodies] of byDay) {
+    if (date === issued) continue
+    // The statement lists a day newest first: count from its oldest.
+    bodies.slice().reverse().forEach((body, i) => {
+      out.push({ app: 'Kaspi statement', time: `${date}T12:00:00+05:00`, date, seq: i + 1, body, statement: name })
+    })
+  }
+  return out
+}
+
+if (typeof module !== 'undefined') module.exports = { parse, reparseLines, parseStatement, categories, pushId, PARSERS, CATEGORIES }
