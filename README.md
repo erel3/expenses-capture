@@ -1,39 +1,43 @@
 # expenses-capture — payment notifications into iCloud
 
-The phone runs the shortcut "Log Payment" on every payment push. It appends one JSON line to
-`payments.json` in iCloud Drive → Shortcuts (JSON Lines, despite the extension: Shortcuts forces
-`.json` on JSON text): the push as received (`time`, `app`, `title`, `body`) plus, when
-`parse.js` recognises a purchase or a refund, `amount` (negative for a refund), `currency`,
-`kzt` (the amount in tenge, when known), `merchant`, `category`.
+Everything lives in **iCloud Drive → Shortcuts → Expenses**, as JSON Lines (one JSON object per
+line; named `.json` because Shortcuts forces that extension on JSON text):
 
-Payments that send no push (cash, a transfer to a person) are typed in with the shortcut
-**"Log Expense"** (iPhone or Mac: amount, what it was, a category). It appends the same kind of
-line to `manual-<device model>.json` beside `payments.json` (`manual-iPhone.json`,
-`manual-Mac.json`): one file per device, so every file has one writer. A mistake is corrected by
-logging the negative amount. `just install-expense` adds it once (it then syncs to the phone).
+| File | Written by | Holds |
+|---|---|---|
+| `<device>-<year>.json` (`iPhone-2026.json`, `Mac-2026.json`) | that device's shortcuts | every line it captured that year |
+| `edits-<device>.json` | that device's Expenses app | corrections: a category (for one payment or every payment of a merchant), an amount, hide/unhide |
+| `archive-2026.json` | `archive.py`, once | the lines of the old layout (Shortcuts/payments.json, manual-iPhone.json, until 2026-11-25) |
+| `upload.json` | `just update` | a technical line, never read as data |
 
-Two copies, one writer each:
-- **iCloud `payments.json`** — the phone's. Only the shortcut writes it, and only by appending.
-  Nothing on the Mac rewrites it: a rewrite could drop a line the phone appended meanwhile.
-- **`~/.local/share/expenses/payments.json`** — the Mac's. `just reparse` rebuilds it from the
-  iCloud files (`payments.json` and every `manual-*.json`) with the current `parse.js`, so a new parser or category also covers old pushes.
-  A push repeated within a minute (every field but `time` the same) counts once: the automation
-  sometimes runs twice for one push.
+Every file has one writer and is only ever appended to: iCloud keeps one device's version of a
+file two devices write, and a line once vanished that way. A past year never changes again, so the
+current file stays small (~1 MB a year).
 
-    duckdb -c "select * from read_json('~/.local/share/expenses/payments.json')"
+- **"Log Payment"** runs on every push of Kaspi, Freedom and Halyk (the phone automation) and
+  appends the push as received (`time`, `app`, `title`, `subtitle`, `body`) plus, when `parse.js`
+  recognises a purchase or a refund, `amount` (negative for a refund), `currency`, `kzt`,
+  `merchant`, `category`.
+- **"Log Expense"** (iPhone or Mac) asks for an amount, what it was and a category, for payments
+  that send no push (cash, a transfer to a person). `just install-expense` adds it once.
+- **Readers** (the Expenses apps, `just reparse`) read every data file together through parse.js
+  `reparseLines`, which drops probes and repeated pushes, gives each push a stable `id` and applies
+  the corrections. Nothing captured is ever rewritten or deleted; hiding is the undoable delete.
+- `just reparse` writes the Mac's copy, `~/.local/share/expenses/payments.json`:
+
+    duckdb -c "select * from read_json('~/.local/share/expenses/payments.json', union_by_name=true)"
 
 - `parse.js` — every parser and the merchant → category map. It runs on the phone (pasted into the
   shortcut by `build.py`) and in node.
 - `just test`, `just install` (first time only: opens the signed shortcut, Shortcuts asks to add
-  it), `just update` (every later change), `just reparse`. Nothing on the Mac runs the shortcut
-  with a push: it would append to the phone's file (see `just update` below).
+  it), `just update` (every later change), `just reparse`.
 - **`just update`** rewrites the installed shortcut's actions in Shortcuts' own database
   (`~/Library/Shortcuts/Shortcuts.sqlite`, backed up first to `~/.local/share/expenses/`, last 5
   kept), so its identifier stays and the automation needs no re-pick. Then it runs the shortcut
   with a marker input, which makes it append to `upload.json` instead: only a run that writes
   makes Shortcuts save the shortcut, and only its own save uploads it to iCloud. Never
-  `payments.json`: iCloud keeps one device's version of a file, and a Mac probe line once
-  vanished when the phone appended a push; the other way round it would have been the push.
+  a data file: the Mac may write only its own `Mac-<year>.json`, and the update's run is no
+  payment.
 - **Run "Log Payment" by hand on the iPhone once after each change of action UUIDs** (they are
   fixed in `build.py`, so normally never): it writes a probe and asks to allow the write; answer
   Always Allow. iOS keeps that answer per action UUID, and a locked phone cannot answer it, so
