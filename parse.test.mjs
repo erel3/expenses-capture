@@ -172,3 +172,10 @@ test('a manual entry with no number is kept raw', () => {
   const n = { time, app: 'Manual', title: 'x', subtitle: 'food', body: '' }
   assert.deepEqual(parse(n), n)
 })
+
+test('a Kaspi push of money in: from a person a payback, else greyed', () => {
+  const r = parse({ ...kaspi, body: 'Пополнение: 5 000 ₸\nЕржан А.' })
+  assert.deepEqual([r.kzt, r.category, r.kind], [-5000, 'transfers', undefined])
+  const salary = parse({ ...kaspi, body: 'Пополнение: 300 000 ₸\nЗарплата' })
+  assert.deepEqual([salary.kind, salary.kzt], ['income', 300000])
+})

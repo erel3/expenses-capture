@@ -50,23 +50,33 @@ test('statement rows: purchases, refunds, foreign, transfers, fees, cash, settle
   assert.equal(byMerchant(out, 'Банкомат')[0].category, 'cash')
   assert.equal(byMerchant(out, 'FACEIT')[0].kzt, 581.03)
   assert.equal(byMerchant(out, 'WOLT.COM')[0].kzt, -204.5)
-  // money in is income, the Kaspi Deposit paying back included
+  // the Kaspi Deposit paying back: listed, greyed (kind), never counted
   const deposit = out.find((p) => p.operation === 'Поступление со своего счета')
-  assert.deepEqual([deposit.kind, deposit.kzt, deposit.category], ['income', 200000, 'deposit'])
+  assert.deepEqual([deposit.kind, deposit.kzt], ['own', 200000])
 })
 
-test('a transfer to an own card is still money leaving the card: spending in own accounts', () => {
+test('a transfer to an own card is listed but no spending once marked', () => {
   const edits = JSON.stringify({ time: '2026-11-25T12:00:00+05:00', edit: 'own', value: '*0000' })
   const own = lib.reparseLines(file, edits).find((p) => String(p.merchant).includes('Freedom'))
-  assert.deepEqual([own.kind, own.kzt, own.category], [undefined, 5000, 'own accounts'])
+  assert.deepEqual([own.kind, own.kzt], ['own', 5000])
 })
 
-test('income minus spending is the balance change', () => {
-  const out = lib.reparseLines(file)
-  const income = out.filter((p) => p.kind === 'income').reduce((a, p) => a + p.kzt, 0)
-  const spent = out.filter((p) => p.amount !== undefined && p.kind !== 'income').reduce((a, p) => a + p.kzt, 0)
-  // every row of the fixture but the issue day's: + 200 000 + 204,50 in; the rest out
-  assert.equal(Math.round((income - spent) * 100) / 100, 200000 - (1400 * 2 + 12722 + 14607.97 + 5000 + 5305 + 149 + 581.03 + 50000 - 204.5))
+test('money from a person is a payback (refund); salary and other banks are greyed', () => {
+  const extra = lines(statement('25.11.25', '25.11.26', [
+    '24.11.26 + 5 000,00 ₸ Пополнение Ержан А.',
+    '24.11.26 + 300 000,00 ₸ Пополнение Зарплата',
+    '24.11.26 + 10 000,00 ₸ Пополнение по номеру счета АО "Тест Банк"',
+    '24.11.26 - 68 000,00 ₸ Перевод на свой счет',
+    'На Kaspi Депозит',
+  ]))
+  const out = lib.reparseLines(extra)
+  const by = (m) => out.find((p) => p.merchant === m)
+  assert.deepEqual([by('Ержан А.').kzt, by('Ержан А.').category, by('Ержан А.').kind], [-5000, 'transfers', undefined])
+  assert.deepEqual([by('Зарплата').kind, by('Зарплата').kzt], ['income', 300000])
+  assert.equal(by('по номеру счета АО "Тест Банк"').kind, 'income')
+  assert.equal(by('На Kaspi Депозит').kind, 'own')
+  // what counts: only the payback
+  assert.equal(out.filter((p) => !p.kind && p.amount !== undefined).reduce((a, p) => a + p.kzt, 0), -5000)
 })
 
 test('overlapping statements give every row once', () => {

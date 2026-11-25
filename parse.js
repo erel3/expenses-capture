@@ -5,6 +5,10 @@
 // an HTML page that WebKit renders (so: plain browser JS, no imports, never the text of a
 // closing script tag), and in node for the tests and reparse.mjs.
 
+// A person as banks print one: names, then an initial ("Ержан А.", "Əли Ардабекұлы С."); not
+// "Зарплата", "В Kaspi Банкомате", "по номеру счета АО …".
+const PERSON = /^[\p{L}-]+(?: [\p{L}-]+)* \p{L}\.$/u
+
 // The operations a Kaspi Gold statement lists, longest first (one is a prefix of another).
 const STATEMENT_OPS = ['Поступление со своего счета', 'Перевод на свой счет', 'Пополнение', 'Покупка', 'Перевод', 'Разное', 'Снятие']
 
@@ -53,6 +57,16 @@ const PARSERS = [
     // Not a statement row: those have their own parser below ("Kaspi statement" matched here once).
     match: (n) => n.app !== 'Kaspi statement' && (/kaspi/i.test(n.app) || /kaspi/i.test(n.title)),
     parse(n) {
+      // Money in, "Пополнение: 5 000 ₸\nЕржан А.": from a person a payback (refund), else (salary,
+      // another bank) listed greyed, as in statements.
+      const topUp = n.body.match(/^Пополнение:\s*([\d\s]+(?:,\d+)?)\s*(\S+)\n(.+)/)
+      if (topUp) {
+        const from = topUp[3].trim()
+        const value = number(topUp[1])
+        return PERSON.test(from)
+          ? { amount: -value, currency: topUp[2], merchant: from, category: 'transfers', payback: true }
+          : { amount: value, currency: topUp[2], kzt: value, merchant: from, kind: 'income' }
+      }
       const m = n.body.match(
         /(Покупка|Отмена покупки):\s*([\d\s]+(?:,\d+)?)\s*(\S+)(?:\s*\(([\d\s]+(?:,\d+)?)\s*₸\))?/,
       )
@@ -97,10 +111,10 @@ const PARSERS = [
     // A row of a Kaspi Gold statement (PDF, imported by the apps; parseStatement below), its text
     // as PDFKit gives it: "23.11.26 - 14 607,97 ₸ (- 28,74 EUR)\nПокупка LinkedIn P0000000000", or
     // "22.11.26 - 581,03 ₸ Покупка FACEIT\nКурсовая разница" (a foreign payment's final settlement).
-    // Everything that leaves the card is spending, everything that arrives is income (owner,
-    // 2026-11-25: "treat moving to my cards, deposits as expenses, incomes", so the card's income
-    // minus its spending is its balance change). Income rows carry kind "income" and a positive
-    // kzt; moves to the Kaspi Deposit or own accounts are spending in `deposit` / `own accounts`.
+    // Spending only (owner, 2026-11-25). Every row is listed; what is no spending carries `kind`
+    // and is shown greyed, out of every total: "income" (salary, ATM cash-in, other banks) and
+    // "own" (the Kaspi Deposit and own accounts, both ways). Money from a PERSON is a refund
+    // (a payback for something paid together): negative spending in `transfers`.
     match: (n) => n.app === 'Kaspi statement',
     parse(n) {
       const lines = n.body.split('\n')
@@ -120,14 +134,13 @@ const PARSERS = [
       const money = fx
         ? { amount: (fx[1] === '-' ? 1 : -1) * number(fx[2]), currency: fx[3], kzt: spent }
         : { amount: spent, currency: '₸', kzt: spent }
-      if (m[1] === '+') {
-        // Money in: a top-up, a transfer from someone, the Kaspi Deposit paying back.
-        const from = op === 'Поступление со своего счета' ? (/Депозит/i.test(details) ? 'deposit' : 'own accounts') : 'income'
-        if (op !== 'Покупка') return { ...common, ...money, amount: -money.amount, kzt: -money.kzt, kind: 'income', category: from }
+      if (m[1] === '+' && op !== 'Покупка') {
+        if (op === 'Пополнение' && PERSON.test(details)) return { ...common, ...money, category: 'transfers', payback: true }
+        // shown as money in (positive), never counted
+        const kind = op === 'Поступление со своего счета' ? 'own' : 'income'
+        return { ...common, ...money, amount: -money.amount, kzt: -money.kzt, kind }
       }
-      if (op === 'Перевод на свой счет') {
-        return { ...common, ...money, category: /Депозит/i.test(details) ? 'deposit' : 'own accounts' }
-      }
+      if (op === 'Перевод на свой счет') return { ...common, ...money, kind: 'own' }
       if (op === 'Перевод') return { ...common, ...money, category: 'transfers', transfer: true }
       if (op === 'Разное') return { ...common, ...money, category: 'fees' }
       if (op === 'Снятие') return { ...common, ...money, category: 'cash' }
@@ -154,7 +167,7 @@ function localIso(d) {
 function parse(n, now = new Date()) {
   const received = { ...n }
   for (const k of ['time', 'amount', 'kzt', 'currency', 'merchant', 'category', 'error', 'id', 'hidden', 'edited',
-    'kind', 'dateOnly', 'operation', 'transfer', 'settlement', 'aliases', 'merged']) {
+    'kind', 'dateOnly', 'operation', 'transfer', 'settlement', 'aliases', 'merged', 'payback']) {
     delete received[k]
   }
   const note = {
@@ -170,8 +183,8 @@ function parse(n, now = new Date()) {
     const parser = PARSERS.find((p) => p.match(note))
     const hit = parser ? parser.parse(note) : null
     if (!hit) return note
-    // Money in, a move between own accounts: understood, but no payment.
-    if (hit.amount === undefined) return { ...note, ...hit }
+    // Money in, a move between own accounts: understood, listed greyed, never counted.
+    if (hit.amount === undefined || hit.kind) return { ...note, ...hit }
     const kzt = hit.kzt ?? (hit.currency === '₸' ? hit.amount : undefined)
     return {
       ...note,
@@ -243,9 +256,9 @@ function applyEdits(p, edits) {
   // push before the statement came keeps working.
   const ids = [p.id, ...(p.aliases || [])]
   const latest = (map) => ids.map((id) => map.get(id)).find((v) => v !== undefined)
-  // A transfer to an own card is still money leaving this card: spending in `own accounts`.
+  // A transfer to an own card: listed, greyed, no spending.
   if (p.transfer && [...edits.own].some((own) => String(p.merchant || '').includes(own))) {
-    p.category = 'own accounts'
+    p.kind = 'own'
   }
   const changed = []
   if (p.amount !== undefined) {
