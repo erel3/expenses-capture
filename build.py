@@ -150,6 +150,24 @@ def append_if_parsed(name, line, path_parts):
   ], action("conditional", WFControlFlowMode=2, GroupingIdentifier=group, UUID=end)
 
 
+def refresh_app(name, device_var):
+  """The Expenses iPhone app's "Refresh Expenses" (an App Intent, run in the background) after a line
+  was written, so the iPhone widget shows it seconds later. iPhone only: the Mac app is built
+  without App Intents metadata and watches the files itself. The action's shape was read from a
+  shortcut the owner made with it (2026-11-25), not guessed."""
+  group, refresh, end = (stable(name, r) for r in ("refresh-group", "refresh", "refresh-end"))
+  return [
+    action("conditional", WFControlFlowMode=0, GroupingIdentifier=group, WFCondition=99,
+           WFConditionalActionString="iPhone",
+           WFInput={"Type": "Variable", "Variable": attachment(device_var)}),
+    {"WFWorkflowActionIdentifier": "com.akim.expenses.RefreshExpensesIntent",
+     "WFWorkflowActionParameters": {"UUID": refresh, "AppIntentDescriptor": {
+       "TeamIdentifier": "73R36N2A46", "BundleIdentifier": "com.akim.expenses", "Name": "Expenses",
+       "AppIntentIdentifier": "RefreshExpensesIntent"}}},
+    action("conditional", WFControlFlowMode=2, GroupingIdentifier=group, UUID=end),
+  ]
+
+
 # Output nothing. Otherwise Shortcuts appends an output action of its own on save, and each
 # caller is asked "Allow Log Payment to output 1 dictionary?" (a CLI run on the Mac hung on it).
 # No UUID on purpose: the run `update` makes gives it one and saves the shortcut, and only a
@@ -177,7 +195,11 @@ def payment_actions(script: str):
     action("conditional", WFControlFlowMode=1, GroupingIdentifier=in_group),
     action("gettext", WFTextActionText='{"probe":true}', UUID=probe),
     action("conditional", WFControlFlowMode=2, GroupingIdentifier=in_group, UUID=in_end),
-    *upload, *parse_block, *append, append_end, upload_end, NOTHING,
+    *upload, *parse_block, *append,
+    action("getdevicedetails", WFDeviceDetail="Device Model", CustomOutputName="Device",
+           UUID=stable(name, "device")),
+    *refresh_app(name, output(stable(name, "device"), "Device")),
+    append_end, upload_end, NOTHING,
   ]
 
 
@@ -219,6 +241,7 @@ def expense_actions(script: str, categories: list[str]):
     action("notification", WFNotificationActionTitle="Expense logged",
            WFNotificationActionBody=tokens([amount_var, " ₸ · ", what_var, " · ", picked_var]),
            WFNotificationActionSound=False),
+    *refresh_app(name, device_var),
     append_end, upload_end, NOTHING,
   ]
 
