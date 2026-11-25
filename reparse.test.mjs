@@ -49,3 +49,54 @@ test('a line that is not JSON is kept as an unreadable push', () => {
   assert.equal(out[1].body, '{"time":"2026-11-23T12:20')
   assert.ok(!('amount' in out[1]))
 })
+
+// Corrections written by the apps (edits-<device>.json).
+const wolt = (time, amount) => JSON.stringify({ time, app: 'Kaspi.kz', title: 'Kaspi Gold', subtitle: '',
+  body: `Покупка: ${amount} ₸\nWOLT.COM\nДоступно: 1 ₸` })
+const edit = (e) => JSON.stringify(e)
+
+test('every push gets an id that does not change between reads', () => {
+  const lines = [wolt('2026-11-20T10:00:00+05:00', 1000), wolt('2026-11-21T10:00:00+05:00', 2000)]
+  const first = reparse(lines)
+  assert.equal(first.length, 2)
+  assert.match(first[0].id, /^[0-9a-f]{16}$/)
+  assert.notEqual(first[0].id, first[1].id)
+  assert.deepEqual(reparse(lines).map((p) => p.id), first.map((p) => p.id))
+})
+
+test('a payment correction beats the merchant one, which beats the table', () => {
+  const lines = [wolt('2026-11-20T10:00:00+05:00', 1000), wolt('2026-11-21T10:00:00+05:00', 2000)]
+  const [a, b] = reparse(lines)
+  assert.equal(a.category, 'food')  // the table: WOLT -> food
+  const edits = [
+    edit({ time: '2026-11-22T10:00:00+05:00', edit: 'category', merchant: 'WOLT.COM', value: 'delivery' }),
+    edit({ time: '2026-11-21T09:00:00+05:00', edit: 'category', id: a.id, value: 'gifts' }),
+  ].join('\n')
+  const out = lib.reparseLines(lines.join('\n'), edits)
+  assert.equal(out[0].category, 'gifts')  // its own, even though older than the merchant's
+  assert.equal(out[1].category, 'delivery')
+  assert.deepEqual(out[1].edited, ['category'])
+  assert.deepEqual(lib.categories(edits), ['transport', 'food', 'subscriptions', 'delivery', 'gifts', 'other'])
+})
+
+test('the latest correction of a target wins, whichever device wrote it', () => {
+  const [a] = reparse([wolt('2026-11-20T10:00:00+05:00', 1000)])
+  const mac = edit({ time: '2026-11-22T10:00:00+05:00', edit: 'hide', id: a.id })
+  const phone = edit({ time: '2026-11-23T10:00:00+05:00', edit: 'unhide', id: a.id })
+  assert.equal(lib.reparseLines(wolt('2026-11-20T10:00:00+05:00', 1000), [phone, mac].join('\n'))[0].hidden, undefined)
+  assert.equal(lib.reparseLines(wolt('2026-11-20T10:00:00+05:00', 1000), mac)[0].hidden, true)
+})
+
+test('an amount correction sets the tenge, the received amount stays', () => {
+  const [a] = reparse([wolt('2026-11-20T10:00:00+05:00', 1000)])
+  const out = lib.reparseLines(wolt('2026-11-20T10:00:00+05:00', 1000),
+    edit({ time: '2026-11-21T10:00:00+05:00', edit: 'amount', id: a.id, value: 950 }))
+  assert.equal(out[0].kzt, 950)
+  assert.equal(out[0].amount, 1000)
+  assert.deepEqual(out[0].edited, ['amount'])
+})
+
+test('lines from several files come out in time order', () => {
+  const out = reparse([wolt('2026-11-21T10:00:00+05:00', 2000), wolt('2026-11-20T10:00:00+05:00', 1000)])
+  assert.deepEqual(out.map((p) => p.amount), [1000, 2000])
+})

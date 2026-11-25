@@ -108,7 +108,7 @@ function localIso(d) {
 // parsed fields are dropped and computed again.
 function parse(n, now = new Date()) {
   const received = { ...n }
-  for (const k of ['time', 'amount', 'kzt', 'currency', 'merchant', 'category', 'error']) {
+  for (const k of ['time', 'amount', 'kzt', 'currency', 'merchant', 'category', 'error', 'id', 'hidden', 'edited']) {
     delete received[k]
   }
   const note = {
@@ -144,11 +144,83 @@ function parse(n, now = new Date()) {
 // is the same push.
 const SAME_PUSH_MS = 60000
 
-// The whole payments.json (JSON Lines) -> parsed pushes, oldest first: probes and repeated pushes
-// dropped, everything else kept, payments or not. Used by reparse.mjs and by the Expenses app (run
-// in JavaScriptCore), so both count the same. A line that is not JSON (iCloud mid-sync, a torn
-// append) is kept as a push titled "unreadable line" rather than dropped or fatal.
-function reparseLines(text) {
+// A push's id: a hash of what was received, so it never changes and corrections can point at it.
+// FNV-1a, twice with different seeds, 16 hex digits.
+function pushId(n) {
+  const text = [n.time, n.app, n.title, n.body].map((v) => String(v ?? '')).join('|')
+  const fnv = (seed) => {
+    let h = seed >>> 0
+    for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619) >>> 0
+    return h.toString(16).padStart(8, '0')
+  }
+  return fnv(2166136261) + fnv(0x811c9dc5 ^ 0x5bd1e995)
+}
+
+// Corrections the apps write (edits-<device>.json), oldest first; the last one wins per target.
+//   {"time", "edit": "category", "id" | "merchant", "value"}   this payment / every payment of a merchant
+//   {"time", "edit": "amount", "id", "value"}                  its tenge
+//   {"time", "edit": "hide" | "unhide", "id"}
+// A payment's own category beats its merchant's, which beats the CATEGORIES table.
+function readEdits(text) {
+  const edits = { category: new Map(), merchant: new Map(), amount: new Map(), hidden: new Map() }
+  const lines = []
+  for (const line of String(text || '').split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const e = JSON.parse(line)
+      if (e && typeof e === 'object' && e.edit) lines.push(e)
+    } catch (_) {
+      // a torn line mid-sync: the next read has it whole
+    }
+  }
+  lines.sort((a, b) => String(a.time).localeCompare(String(b.time)))
+  for (const e of lines) {
+    if (e.edit === 'category' && e.id) edits.category.set(e.id, String(e.value ?? ''))
+    else if (e.edit === 'category' && e.merchant) edits.merchant.set(String(e.merchant).toUpperCase(), String(e.value ?? ''))
+    else if (e.edit === 'amount' && e.id && Number.isFinite(Number(e.value))) edits.amount.set(e.id, Number(e.value))
+    else if ((e.edit === 'hide' || e.edit === 'unhide') && e.id) edits.hidden.set(e.id, e.edit === 'hide')
+  }
+  return edits
+}
+
+function applyEdits(p, edits) {
+  const changed = []
+  if (p.amount !== undefined) {
+    const own = edits.category.get(p.id)
+    const merchant = edits.merchant.get(String(p.merchant || '').toUpperCase())
+    const picked = own ?? merchant
+    if (picked !== undefined && picked !== p.category) {
+      p.category = picked === 'other' ? '' : picked
+      changed.push('category')
+    }
+    if (edits.amount.has(p.id)) {
+      p.kzt = edits.amount.get(p.id)
+      changed.push('amount')
+    }
+  }
+  if (edits.hidden.get(p.id)) p.hidden = true
+  if (changed.length) p.edited = changed
+  return p
+}
+
+// Every category in use: the table's, the ones corrections gave (a new category exists only by
+// being given to a payment), and "other". The "Log Expense" menu and the apps' pickers.
+function categories(editsText) {
+  const edits = readEdits(editsText)
+  const table = [...new Set(Object.values(CATEGORIES))]
+  const added = [...new Set([...edits.category.values(), ...edits.merchant.values()])]
+    .filter((c) => c && c !== 'other' && !table.includes(c))
+    .sort()
+  return [...table, ...added, 'other']
+}
+
+// Every data file's text joined (JSON Lines) -> parsed pushes, oldest first: probes and repeated
+// pushes dropped, everything else kept, payments or not, each with its `id` and the corrections
+// from `editsText` applied. Used by reparse.mjs and by the Expenses apps (run in JavaScriptCore),
+// so all count the same. A line that is not JSON (iCloud mid-sync, a torn append) is kept as a
+// push titled "unreadable line" rather than dropped or fatal.
+function reparseLines(text, editsText) {
+  const edits = readEdits(editsText)
   const seen = new Map() // push without time -> when it was last seen, in ms
   const out = []
   for (const line of String(text).split('\n')) {
@@ -157,7 +229,7 @@ function reparseLines(text) {
     try {
       n = JSON.parse(line)
     } catch (e) {
-      out.push({ time: '', app: '', title: 'unreadable line', body: line, error: String(e) })
+      out.push({ time: '', app: '', title: 'unreadable line', body: line, error: String(e), id: pushId({ body: line }) })
       continue
     }
     // A hand run of the shortcut on the phone appends one probe line (it asks the write
@@ -168,9 +240,14 @@ function reparseLines(text) {
     const before = seen.get(key)
     seen.set(key, at)
     if (before !== undefined && at - before < SAME_PUSH_MS) continue
-    out.push(parse(n))
+    const p = parse(n)
+    p.id = pushId(p)
+    out.push(applyEdits(p, edits))
   }
-  return out
+  // Files are read one after another; the list is in time order whatever the file order, lines
+  // with no time (unreadable) last, in the order met.
+  const timed = out.filter((p) => p.time).sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
+  return [...timed, ...out.filter((p) => !p.time)]
 }
 
-if (typeof module !== 'undefined') module.exports = { parse, reparseLines, PARSERS, CATEGORIES }
+if (typeof module !== 'undefined') module.exports = { parse, reparseLines, categories, pushId, PARSERS, CATEGORIES }

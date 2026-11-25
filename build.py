@@ -37,11 +37,14 @@ HERE = Path(__file__).resolve().parent
 OUT = HERE / "build"
 PAYMENT = "Log Payment"
 EXPENSE = "Log Expense"
+# Everything lives in iCloud Drive → Shortcuts → Expenses. Captured lines go to
+# <device model>-<year>.json: one writer per file (iCloud keeps one device's copy of a file two
+# devices append to), and a past year never changes again, so the current file stays small.
 # JSON Lines, but named .json: Shortcuts appends to "<path>.json" when the text is JSON and the
 # path does not end in .json (raw.jsonl became raw.jsonl.json, a text coercion did not help).
-FILE = "payments.json"
+FOLDER = "Expenses"
 # What `update`'s run writes instead (see actions()), and the marker its input carries.
-UPLOAD_FILE = "upload.json"
+UPLOAD_FILE = f"{FOLDER}/upload.json"
 UPLOAD_MARK = "erel3-expenses-upload"
 OBJ = "￼"  # where a variable sits inside a token string
 
@@ -150,6 +153,17 @@ def append_if_parsed(name, line, path_parts):
   ], action("conditional", WFControlFlowMode=2, GroupingIdentifier=group, UUID=end)
 
 
+def device_and_year(name):
+  """Get Device Details (Device Model: "iPhone", "Mac") and the current year: the data file's name.
+  Returns (actions, path parts for the append)."""
+  device, year = stable(name, "device"), stable(name, "year")
+  return [
+    action("getdevicedetails", WFDeviceDetail="Device Model", CustomOutputName="Device", UUID=device),
+    action("format.date", WFDateFormatStyle="Custom", WFDateFormat="yyyy",
+           WFDate=tokens([{"Type": "CurrentDate"}]), CustomOutputName="Year", UUID=year),
+  ], [f"{FOLDER}/", output(device, "Device"), "-", output(year, "Year"), ".json"]
+
+
 def refresh_app(name, device_var):
   """The Expenses iPhone app's "Refresh Expenses" (an App Intent, run in the background) after a line
   was written, so the iPhone widget shows it seconds later. iPhone only: the Mac app is built
@@ -187,7 +201,8 @@ def payment_actions(script: str):
   received = output(in_end, "If Result")  # the input as JSON text (dictionary or JSON file), or the probe
   upload, upload_end = upload_branch(name, received)
   parse_block, payment = run_parse(name, script, received, "Payment")
-  append, append_end = append_if_parsed(name, payment, [FILE])
+  where, path = device_and_year(name)
+  append, append_end = append_if_parsed(name, payment, path)
   return [
     action("conditional", WFControlFlowMode=0, GroupingIdentifier=in_group, WFCondition=100,
            WFInput={"Type": "Variable", "Variable": attachment(shortcut_input)}),
@@ -195,9 +210,7 @@ def payment_actions(script: str):
     action("conditional", WFControlFlowMode=1, GroupingIdentifier=in_group),
     action("gettext", WFTextActionText='{"probe":true}', UUID=probe),
     action("conditional", WFControlFlowMode=2, GroupingIdentifier=in_group, UUID=in_end),
-    *upload, *parse_block, *append,
-    action("getdevicedetails", WFDeviceDetail="Device Model", CustomOutputName="Device",
-           UUID=stable(name, "device")),
+    *upload, *parse_block, *where, *append,
     *refresh_app(name, output(stable(name, "device"), "Device")),
     append_end, upload_end, NOTHING,
   ]
@@ -215,8 +228,9 @@ def expense_actions(script: str, categories: list[str]):
   amount_var, what_var = output(amount, "Amount"), output(what, "What")
   picked_var, device_var = output(picked, "Category"), output(device, "Device")
   parse_block, line = run_parse(name, script, output(given, "Expense"), "Expense line")
-  # One file per device: payments.json is the phone automation's, manual-Mac.json the Mac's own.
-  append, append_end = append_if_parsed(name, line, ["manual-", device_var, ".json"])
+  # The same file Log Payment writes on this device: one file per device and year.
+  where, path = device_and_year(name)
+  append, append_end = append_if_parsed(name, line, path)
   return [
     action("gettext", WFTextActionText=tokens([shortcut_input]), CustomOutputName="Received", UUID=received),
     *upload,
@@ -231,7 +245,7 @@ def expense_actions(script: str, categories: list[str]):
     # (the If action's form) it read as empty, the question was skipped and the category came out "".
     action("choosefromlist", WFInput=attachment(output(items, "List")),
            WFChooseFromListActionPrompt="Category", CustomOutputName="Category", UUID=picked),
-    action("getdevicedetails", WFDeviceDetail="Device Model", CustomOutputName="Device", UUID=device),
+    *where,
     # The same shape the phone automation sends, so parse.js's Manual parser reads it; the amount
     # as a number (type 3) so it reaches the script as 1500.5 whatever the locale prints.
     action("dictionary", WFItems={"Value": {"WFDictionaryFieldValueItems": [
@@ -248,12 +262,17 @@ def expense_actions(script: str, categories: list[str]):
   ]
 
 
+ICLOUD = Path.home() / "Library/Mobile Documents/iCloud~is~workflow~my~workflows/Documents" / FOLDER
+
+
 def categories() -> list[str]:
-  """The categories parse.js knows, in table order, then "other": the Log Expense menu."""
-  out = subprocess.run(["node", "-e", "const c = require('./parse.js').CATEGORIES;"
-                        "console.log(JSON.stringify([...new Set(Object.values(c))]))"],
-                       cwd=HERE, check=True, capture_output=True, text=True).stdout
-  return [*json.loads(out), "other"]
+  """The Log Expense menu: parse.js's categories(), the table's plus every one the apps' corrections
+  gave (edits-<device>.json), then "other". A new category reaches the menu with `just update`."""
+  edits = "\n".join(f.read_text() for f in sorted(ICLOUD.glob("edits-*.json")))
+  out = subprocess.run(["node", "-e", "let t='';process.stdin.on('data',d=>t+=d).on('end',()=>"
+                        "console.log(JSON.stringify(require('./parse.js').categories(t))))"],
+                       cwd=HERE, input=edits, check=True, capture_output=True, text=True).stdout
+  return json.loads(out)
 
 
 def shortcut(actions, icon_color):
@@ -333,7 +352,7 @@ def update(name, new_actions):
   print(f'updated "{name}" in place; backup {backup}')
   # Shortcuts uploads a row only after it saves it itself, and only a run that writes a file
   # makes it save (a run that wrote nothing did not, measured 2026-11-20). This run carries
-  # UPLOAD_MARK, so it appends to UPLOAD_FILE and never touches payments.json (see actions()).
+  # UPLOAD_MARK, so it appends to UPLOAD_FILE and never touches a data file (see upload_branch()).
   # A run once hung for 60 s on a Mac permission prompt; the upload check below still decides.
   OUT.mkdir(exist_ok=True)
   mark = OUT / "upload.json"
