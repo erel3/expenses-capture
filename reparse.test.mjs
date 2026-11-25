@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { reparse } from './reparse.mjs'
+import lib from './parse.js'
+
+const reparse = (lines) => lib.reparseLines(lines.join('\n'))
 
 const debit = {
   app: 'Freedom',
@@ -38,4 +40,12 @@ test('another balance is another payment', () => {
 
 test('probes and blank lines are skipped', () => {
   assert.equal(reparse(['', JSON.stringify({ time: '2026-11-23T12:00:00+05:00', probe: true })]).length, 0)
+})
+
+test('a line that is not JSON is kept as an unreadable push', () => {
+  const out = reparse([at('2026-11-23T12:19:39+05:00'), '{"time":"2026-11-23T12:20', ''])
+  assert.equal(out.length, 2)
+  assert.equal(out[1].title, 'unreadable line')
+  assert.equal(out[1].body, '{"time":"2026-11-23T12:20')
+  assert.ok(!('amount' in out[1]))
 })

@@ -123,4 +123,40 @@ function parse(n, now = new Date()) {
   }
 }
 
-if (typeof module !== 'undefined') module.exports = { parse, PARSERS }
+// The automation sometimes runs twice for one push: on 2026-11-23 a Freedom debit and its cashback
+// each landed twice, a second apart, every field the same but `time` (the shortcut stamps it), the
+// balance in the body included, while the bank app showed one payment. A real second payment
+// changes the balance the body prints, so the same app, title, subtitle and body within a minute
+// is the same push.
+const SAME_PUSH_MS = 60000
+
+// The whole payments.json (JSON Lines) -> parsed pushes, oldest first: probes and repeated pushes
+// dropped, everything else kept, payments or not. Used by reparse.mjs and by the Expenses app (run
+// in JavaScriptCore), so both count the same. A line that is not JSON (iCloud mid-sync, a torn
+// append) is kept as a push titled "unreadable line" rather than dropped or fatal.
+function reparseLines(text) {
+  const seen = new Map() // push without time -> when it was last seen, in ms
+  const out = []
+  for (const line of String(text).split('\n')) {
+    if (!line.trim()) continue
+    let n
+    try {
+      n = JSON.parse(line)
+    } catch (e) {
+      out.push({ time: '', app: '', title: 'unreadable line', body: line, error: String(e) })
+      continue
+    }
+    // A hand run of the shortcut on the phone appends one probe line (it asks the write
+    // permission once); it is no payment.
+    if (!n || typeof n !== 'object' || n.probe) continue
+    const key = JSON.stringify([n.app, n.title, n.subtitle, n.body])
+    const at = Date.parse(n.time)
+    const before = seen.get(key)
+    seen.set(key, at)
+    if (before !== undefined && at - before < SAME_PUSH_MS) continue
+    out.push(parse(n))
+  }
+  return out
+}
+
+if (typeof module !== 'undefined') module.exports = { parse, reparseLines, PARSERS }
