@@ -173,7 +173,8 @@ function readEdits(text) {
       // a torn line mid-sync: the next read has it whole
     }
   }
-  lines.sort((a, b) => String(a.time).localeCompare(String(b.time)))
+  // By the moment, not the text: the two apps may write times in different offsets.
+  lines.sort((a, b) => (Date.parse(a.time) || 0) - (Date.parse(b.time) || 0))
   for (const e of lines) {
     if (e.edit === 'category' && e.id) edits.category.set(e.id, String(e.value ?? ''))
     else if (e.edit === 'category' && e.merchant) edits.merchant.set(String(e.merchant).toUpperCase(), String(e.value ?? ''))
