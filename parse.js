@@ -253,10 +253,15 @@ function reparseLines(text, editsText) {
     const id = pushId(n)
     if (ids.has(id)) continue
     ids.add(id)
-    const key = JSON.stringify([n.app, n.title, n.subtitle, n.body])
-    const before = seen.get(key)
-    seen.set(key, at(n))
-    if (before !== undefined && at(n) - before < SAME_PUSH_MS) continue
+    // Only a bank push can arrive twice (the automation ran twice for one notification). A manual
+    // entry is typed on purpose: two identical ones a minute apart are two payments (owner,
+    // 2026-11-25: skip only the notification's real duplicate).
+    if (n.app !== 'Manual') {
+      const key = JSON.stringify([n.app, n.title, n.subtitle, n.body])
+      const before = seen.get(key)
+      seen.set(key, at(n))
+      if (before !== undefined && at(n) - before < SAME_PUSH_MS) continue
+    }
     const p = parse(n)
     p.id = id
     out.push(applyEdits(p, edits))

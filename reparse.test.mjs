@@ -113,6 +113,11 @@ test('a newer copy read first does not swallow an older entry (files are read ou
   // the Mac's file is read before the archive, so the newer line comes first
   const out = reparse([manual('2026-11-25T16:05:00+05:00'), manual('2026-11-24T09:00:00+05:00')])
   assert.deepEqual(out.map((p) => p.time), ['2026-11-24T09:00:00+05:00', '2026-11-25T16:05:00+05:00'])
-  // a real double run, read in reverse, is still one
-  assert.equal(reparse([manual('2026-11-25T16:05:30+05:00'), manual('2026-11-25T16:05:00+05:00')]).length, 1)
+  // two coffees logged half a minute apart are two payments: manual entries are never repeats
+  assert.equal(reparse([manual('2026-11-25T16:05:30+05:00'), manual('2026-11-25T16:05:00+05:00')]).length, 2)
+})
+
+test('a bank push the automation logged twice, read in reverse, is still one', () => {
+  const push = (time) => JSON.stringify({ time, app: 'Freedom', title: 'Списана сумма', subtitle: '', body: '-18 078 ₸' })
+  assert.equal(reparse([push('2026-11-23T12:19:40+05:00'), push('2026-11-23T12:19:39+05:00')]).length, 1)
 })
