@@ -50,16 +50,23 @@ test('statement rows: purchases, refunds, foreign, transfers, fees, cash, settle
   assert.equal(byMerchant(out, 'Банкомат')[0].category, 'cash')
   assert.equal(byMerchant(out, 'FACEIT')[0].kzt, 581.03)
   assert.equal(byMerchant(out, 'WOLT.COM')[0].kzt, -204.5)
+  // money in is income, the Kaspi Deposit paying back included
   const deposit = out.find((p) => p.operation === 'Поступление со своего счета')
-  assert.equal(deposit.kind, 'income')
-  assert.equal(deposit.amount, undefined)
+  assert.deepEqual([deposit.kind, deposit.kzt, deposit.category], ['income', 200000, 'deposit'])
 })
 
-test('a transfer to an own card is no spending once marked', () => {
+test('a transfer to an own card is still money leaving the card: spending in own accounts', () => {
   const edits = JSON.stringify({ time: '2026-11-25T12:00:00+05:00', edit: 'own', value: '*0000' })
   const own = lib.reparseLines(file, edits).find((p) => String(p.merchant).includes('Freedom'))
-  assert.equal(own.kind, 'own')
-  assert.equal(own.amount, undefined)
+  assert.deepEqual([own.kind, own.kzt, own.category], [undefined, 5000, 'own accounts'])
+})
+
+test('income minus spending is the balance change', () => {
+  const out = lib.reparseLines(file)
+  const income = out.filter((p) => p.kind === 'income').reduce((a, p) => a + p.kzt, 0)
+  const spent = out.filter((p) => p.amount !== undefined && p.kind !== 'income').reduce((a, p) => a + p.kzt, 0)
+  // every row of the fixture but the issue day's: + 200 000 + 204,50 in; the rest out
+  assert.equal(Math.round((income - spent) * 100) / 100, 200000 - (1400 * 2 + 12722 + 14607.97 + 5000 + 5305 + 149 + 581.03 + 50000 - 204.5))
 })
 
 test('overlapping statements give every row once', () => {

@@ -97,8 +97,10 @@ const PARSERS = [
     // A row of a Kaspi Gold statement (PDF, imported by the apps; parseStatement below), its text
     // as PDFKit gives it: "23.11.26 - 14 607,97 ₸ (- 28,74 EUR)\nПокупка LinkedIn P0000000000", or
     // "22.11.26 - 581,03 ₸ Покупка FACEIT\nКурсовая разница" (a foreign payment's final settlement).
-    // Purchases, transfers, fees and cash are spending; money in and moves between own accounts are
-    // not (kind "income" / "own": no amount, out of every total and list).
+    // Everything that leaves the card is spending, everything that arrives is income (owner,
+    // 2026-11-25: "treat moving to my cards, deposits as expenses, incomes", so the card's income
+    // minus its spending is its balance change). Income rows carry kind "income" and a positive
+    // kzt; moves to the Kaspi Deposit or own accounts are spending in `deposit` / `own accounts`.
     match: (n) => n.app === 'Kaspi statement',
     parse(n) {
       const lines = n.body.split('\n')
@@ -115,11 +117,17 @@ const PARSERS = [
       if (settlement) details = details.replace(/\s*Курсовая разница$/, '')
       const spent = (m[1] === '-' ? 1 : -1) * number(m[2])
       const common = { dateOnly: true, operation: op, merchant: details }
-      if (op === 'Пополнение' || op === 'Поступление со своего счета') return { ...common, kind: 'income' }
-      if (op === 'Перевод на свой счет') return { ...common, kind: 'own' }
       const money = fx
         ? { amount: (fx[1] === '-' ? 1 : -1) * number(fx[2]), currency: fx[3], kzt: spent }
         : { amount: spent, currency: '₸', kzt: spent }
+      if (m[1] === '+') {
+        // Money in: a top-up, a transfer from someone, the Kaspi Deposit paying back.
+        const from = op === 'Поступление со своего счета' ? (/Депозит/i.test(details) ? 'deposit' : 'own accounts') : 'income'
+        if (op !== 'Покупка') return { ...common, ...money, amount: -money.amount, kzt: -money.kzt, kind: 'income', category: from }
+      }
+      if (op === 'Перевод на свой счет') {
+        return { ...common, ...money, category: /Депозит/i.test(details) ? 'deposit' : 'own accounts' }
+      }
       if (op === 'Перевод') return { ...common, ...money, category: 'transfers', transfer: true }
       if (op === 'Разное') return { ...common, ...money, category: 'fees' }
       if (op === 'Снятие') return { ...common, ...money, category: 'cash' }
@@ -235,9 +243,9 @@ function applyEdits(p, edits) {
   // push before the statement came keeps working.
   const ids = [p.id, ...(p.aliases || [])]
   const latest = (map) => ids.map((id) => map.get(id)).find((v) => v !== undefined)
+  // A transfer to an own card is still money leaving this card: spending in `own accounts`.
   if (p.transfer && [...edits.own].some((own) => String(p.merchant || '').includes(own))) {
-    for (const k of ['amount', 'kzt', 'currency', 'category', 'transfer']) delete p[k]
-    p.kind = 'own'
+    p.category = 'own accounts'
   }
   const changed = []
   if (p.amount !== undefined) {
