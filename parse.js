@@ -348,9 +348,9 @@ const sameMerchant = (a, b) => {
 // A Kaspi Gold push of such a day is folded into its statement row (same tenge, the same or a cut
 // merchant first): the row takes the push's exact time and keeps its id as an alias, so
 // corrections made on the push still apply; a push with no row is dropped. A manual entry with
-// the same tenge on that day is folded the same way (transfers first: what is typed by hand is
-// mostly that), its category kept when the row has none; an unmatched manual entry stays (cash,
-// another bank). Days no statement covers are left as they are.
+// the same tenge on that day is folded into a statement TRANSFER the same way (never a cash entry,
+// never into a card purchase: those are two payments), its category kept when the row has none;
+// an unmatched manual entry stays (cash, another bank). Days no statement covers are left as they are.
 function mergeStatements(list, statements) {
   if (!statements.length) return list
   const covered = (day) => statements.some((s) => s.from <= day && (day < s.to || (s.issued && day === s.to && s.issued > s.to)))
@@ -387,7 +387,9 @@ function mergeStatements(list, statements) {
       if (row) fold(row, p, { time: true })
       continue // statement wins: a push the bank did not list is no payment of that card
     }
-    const row = free.find((r) => r.transfer) || free[0]
+    // Only into a transfer, and never a cash entry: a cash coffee of 1 500 ₸ on a day a card also
+    // paid 1 500 ₸ is two payments (what is typed by hand that a statement also lists is a transfer).
+    const row = p.category === 'cash' ? undefined : free.find((r) => r.transfer)
     if (!row) {
       out.push(p)
       continue

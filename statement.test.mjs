@@ -96,3 +96,11 @@ test('pushes of a covered day fold into their statement rows; the rest stay', ()
   assert.equal(rent.length, 1) // the manual transfer folded into the statement's
   assert.equal(rent[0].category, 'home')
 })
+
+test('a manual cash entry with a card payment\'s amount stays its own payment', () => {
+  const cash = JSON.stringify({ time: '2026-11-24T09:00:00+05:00', app: 'Manual', title: 'Coffee', subtitle: 'cash', body: '12722' })
+  const card = JSON.stringify({ time: '2026-11-24T09:00:00+05:00', app: 'Manual', title: 'Coffee', subtitle: 'food', body: '1400' })
+  const out = lib.reparseLines([file, cash, card].join('\n'))
+  assert.equal(out.filter((p) => p.kzt === 12722).length, 2) // RYADOM by card + the cash coffee
+  assert.equal(out.filter((p) => p.kzt === 1400).length, 3) // two ИП ТЕСТ coffees + the typed one
+})
