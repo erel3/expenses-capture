@@ -285,7 +285,8 @@ def update(name, new_actions):
     rows = db.execute("select Z_PK from ZSHORTCUT where ZNAME = ? and ZTOMBSTONED = 0",
                       (name,)).fetchall()
     if not rows:
-      print(f'"{name}" is not installed yet: `just install` adds it once; skipped')
+      recipe = "install" if name == PAYMENT else "install-expense"
+      print(f'"{name}" is not installed yet: `just {recipe}` adds it once; skipped')
       return
     if len(rows) > 1:
       sys.exit(f'{len(rows)} shortcuts named "{name}" (need exactly one): delete the extra copies')
