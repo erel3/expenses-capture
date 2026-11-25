@@ -222,39 +222,47 @@ function categories(editsText) {
 // push titled "unreadable line" rather than dropped or fatal.
 function reparseLines(text, editsText) {
   const edits = readEdits(editsText)
-  const seen = new Map() // push without time -> when it was last seen, in ms
-  // The same line twice (time included) is one push, wherever it sits: a file and its archive
-  // copy, read side by side while the old layout is being moved.
-  const ids = new Set()
-  const out = []
+  // Every line first, then in time order: the files are read one after another (Mac-2026.json
+  // sorts before archive-2026.json), and the duplicate rule below must meet each push after the
+  // earlier ones, or an older line looks like a repeat of a newer one and is dropped (seen
+  // 2026-11-25: a manual "Testing 200" from 15:25 vanished behind the same entry from 16:05).
+  const lines = []
+  const unreadable = []
   for (const line of String(text).split('\n')) {
     if (!line.trim()) continue
     let n
     try {
       n = JSON.parse(line)
     } catch (e) {
-      out.push({ time: '', app: '', title: 'unreadable line', body: line, error: String(e), id: pushId({ body: line }) })
+      unreadable.push({ time: '', app: '', title: 'unreadable line', body: line, error: String(e), id: pushId({ body: line }) })
       continue
     }
-    // A hand run of the shortcut on the phone appends one probe line (it asks the write
-    // permission once); it is no payment.
+    // A hand run of a shortcut appends one probe line (it asks the write permission once); it is
+    // no payment.
     if (!n || typeof n !== 'object' || n.probe) continue
+    lines.push(n)
+  }
+  const at = (n) => Date.parse(n.time) || 0
+  lines.sort((a, b) => at(a) - at(b))
+  const seen = new Map() // push without time -> when it was last seen, in ms
+  // The same line twice (time included) is one push, wherever it sits: a file and its archive
+  // copy, read side by side while the old layout is being moved.
+  const ids = new Set()
+  const out = []
+  for (const n of lines) {
     const id = pushId(n)
     if (ids.has(id)) continue
     ids.add(id)
     const key = JSON.stringify([n.app, n.title, n.subtitle, n.body])
-    const at = Date.parse(n.time)
     const before = seen.get(key)
-    seen.set(key, at)
-    if (before !== undefined && at - before < SAME_PUSH_MS) continue
+    seen.set(key, at(n))
+    if (before !== undefined && at(n) - before < SAME_PUSH_MS) continue
     const p = parse(n)
     p.id = id
     out.push(applyEdits(p, edits))
   }
-  // Files are read one after another; the list is in time order whatever the file order, lines
-  // with no time (unreadable) last, in the order met.
-  const timed = out.filter((p) => p.time).sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
-  return [...timed, ...out.filter((p) => !p.time)]
+  // Lines with no time (unreadable) last, in the order met.
+  return [...out, ...unreadable]
 }
 
 if (typeof module !== 'undefined') module.exports = { parse, reparseLines, categories, pushId, PARSERS, CATEGORIES }

@@ -107,3 +107,12 @@ test('the same line read from two files counts once', () => {
   // a real repeat an hour later stays two; the archive copy of both adds nothing
   assert.equal(reparse([...file, ...file]).length, 2)
 })
+
+test('a newer copy read first does not swallow an older entry (files are read out of time order)', () => {
+  const manual = (time) => JSON.stringify({ time, app: 'Manual', title: 'Coffee', subtitle: 'food', body: '1500' })
+  // the Mac's file is read before the archive, so the newer line comes first
+  const out = reparse([manual('2026-11-25T16:05:00+05:00'), manual('2026-11-24T09:00:00+05:00')])
+  assert.deepEqual(out.map((p) => p.time), ['2026-11-24T09:00:00+05:00', '2026-11-25T16:05:00+05:00'])
+  // a real double run, read in reverse, is still one
+  assert.equal(reparse([manual('2026-11-25T16:05:30+05:00'), manual('2026-11-25T16:05:00+05:00')]).length, 1)
+})
